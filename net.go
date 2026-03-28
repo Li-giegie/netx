@@ -223,6 +223,8 @@ func WithReadBufSize(size int) Option {
 
 func Listen(network, address string, opts ...Option) (*Listener, error) {
 	var lc ListenConfig
+	lc.WriteBufSize = 1024
+	lc.ReadBufSize = 1024
 	for _, opt := range opts {
 		opt(&lc)
 	}
@@ -231,6 +233,8 @@ func Listen(network, address string, opts ...Option) (*Listener, error) {
 
 func Dial(network, address string, opts ...Option) (*Conn, error) {
 	var d Dialer
+	d.WriteBufSize = 1024
+	d.ReadBufSize = 1024
 	for _, opt := range opts {
 		opt(&d)
 	}

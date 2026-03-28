@@ -10,8 +10,8 @@ import (
 
 var (
 	InvalidCheckSum = errors.New("read packet err:invalid checksum")
-	END             = errors.New("END")
 	ErrStreamError  = errors.New("read stream error")
+	PacketEOF       = errors.New("packet EOF")
 )
 
 func NewWriter(w io.Writer, bufPool Pool) *Writer {
@@ -123,7 +123,7 @@ func (c *Reader) Read(b []byte) (int, error) {
 	}
 	if c.size -= n; c.size == 0 {
 		if c.flag == bytePacket || c.flag == byteStreamEOF {
-			return n, END
+			return n, PacketEOF
 		}
 		if c.flag == byteStreamError {
 			return n, ErrStreamError
@@ -171,7 +171,7 @@ func ReadPacketBuff(r io.Reader, b []byte) ([]byte, error) {
 		n, err := r.Read(b[len(b):cap(b)])
 		b = b[:len(b)+n]
 		if err != nil {
-			if err != END {
+			if err != PacketEOF {
 				return b, err
 			}
 			return b, nil
@@ -190,7 +190,7 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 		n, err := r.Read(b[len(b):cap(b)])
 		b = b[:len(b)+n]
 		if err != nil {
-			if err == END {
+			if errors.Is(err, PacketEOF) {
 				err = nil
 			}
 			return b, err

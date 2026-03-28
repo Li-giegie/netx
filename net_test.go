@@ -1,6 +1,7 @@
 package netx
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -47,7 +48,7 @@ func TestListen(t *testing.T) {
 			for {
 				n, err := conn.Read(buf)
 				if err != nil {
-					if err != END {
+					if errors.Is(err, PacketEOF) {
 						t.Error(err)
 						return
 					}

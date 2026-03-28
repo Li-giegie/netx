@@ -1,29 +1,29 @@
-# netx 
-A library that enhances the read/write capabilities of the native net.Conn, fully compatible with the native net library API. It provides out-of-the-box encapsulated Server and Client objects that support the request-response model.
-
-The Write method encapsulates the bytes to be sent into a single data packet.
-
-The Read method reads bytes, where n returns the number of bytes read and err returns the error information. If err is not nil and equals PacketEOF, it indicates that a complete packet has been read.
-
+# netx
 [![EN](https://img.shields.io/badge/Language-English-blue)](README.md)
 [![中文](https://img.shields.io/badge/Language-中文-red)](README_zh.md)
 
+一个增强原生net.Conn读写能力的库，兼容原生net库API，开箱即用支持请求响应模型的Server、Client封装对象。
+
+Write 方法会把发送的字节封装成一个数据包
+
+Read 方法读取字节，n返回读取的字节数，err返回错误信息，如果err不为nil 为`PacketEOF`错误代表一个包读取完成
+
 Language: [English](README.md) | [中文](README_zh.md)
 
-## Installation
+## 获取
 ```go
 go get git.com/Li-giegie/netx
 ```
-## Features
-- Lightweight: Aligns with the native API and only adds a small number of additional APIs.
-- Connection Multiplexing: Supports multiplexing of network connections.
-- Byte Encapsulation: Solves the sticky packet problem effectively.
-- Packet Checksum: Avoids interference from non-client packets (e.g., packets from web crawlers).
-- Byte Stream Transmission: Supports file upload and download scenarios.
-- Request-Response Model: Built-in support for the classic request-response communication model.
+## 特性
+- 轻量：同原生API一致，仅增加少量API
+- 连接多路复用
+- 封装字节：用于解决粘包
+- 数据包校验和：不会被非客户端包干扰，如互联网爬虫包
+- 支持字节流传输：上传、下载文件
+- 支持请求响应模型
 
-## Usage
-1. The following example demonstrates two usage methods using the native-style API: sending ordinary bytes and transmitting byte streams.
+## 使用
+1. 下面例子演示了使用原生API发送普通字节和字节流两种方式
     ```go
     package netx
     
@@ -121,7 +121,7 @@ go get git.com/Li-giegie/netx
     }
     ```
 
-2. In addition to the raw API usage above, you can also use the encapsulated Server and Client that natively support the request-response model.
+2. 除了上文原始API用法，还可以使用内部封装好的支持请求响应模型的Server、Client
     ```go
     package netx
     
