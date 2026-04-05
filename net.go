@@ -10,22 +10,29 @@ import (
 	"time"
 )
 
+const (
+	DefaultBufferSize = 1430
+	pipeStateOpen     = iota
+	pipeStateClose
+)
+
 var (
-	ErrClosed           = errors.New("closed")
 	ErrAlreadyResponded = errors.New("already responded")
 	ErrStreamSeqInvalid = errors.New("stream seq invalid")
 	ErrStreamReadReader = errors.New("read stream reader error")
 )
 
 func NewConn(conn net.Conn, writeBufSize, readBufSize int) *Conn {
-	var r io.Reader = conn
-	if readBufSize > 0 {
-		r = bufio.NewReaderSize(r, readBufSize)
-	}
 	return &Conn{
 		conn: conn,
-		rd:   NewReader(r),
-		wr:   NewWriter(conn, NewPool(writeBufSize)),
+		rd: or(
+			newOrArg(readBufSize > 0, NewReader(bufio.NewReaderSize(conn, readBufSize))),
+			newOrArg(true, NewReader(bufio.NewReaderSize(conn, DefaultBufferSize))),
+		),
+		wr: NewWriter(conn, or(
+			newOrArg(writeBufSize > 0, NewPool(writeBufSize)),
+			newOrArg(false, NewPool(DefaultBufferSize)),
+		)),
 	}
 }
 
@@ -59,13 +66,6 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
-const (
-	DefaultWriteBufferSize = 1024 * 32
-
-	pipeStateOpen = iota
-	pipeStateClose
-)
-
 // PipeWriter
 // 是一个减少系统Write调用提高性能的管道
 // Write 方法会在适合的时机发出数据
@@ -89,9 +89,9 @@ func (p *PipeWriter) Close() error {
 	p.l.Lock()
 	defer p.l.Unlock()
 	if p.state == pipeStateOpen {
-		close(p.ch)
 		p.state = pipeStateClose
 		p.err = io.ErrClosedPipe
+		close(p.ch)
 		return nil
 	}
 	return p.err
@@ -223,8 +223,8 @@ func WithReadBufSize(size int) Option {
 
 func Listen(network, address string, opts ...Option) (*Listener, error) {
 	var lc ListenConfig
-	lc.WriteBufSize = 1024
-	lc.ReadBufSize = 1024
+	lc.WriteBufSize = DefaultBufferSize
+	lc.ReadBufSize = DefaultBufferSize
 	for _, opt := range opts {
 		opt(&lc)
 	}
@@ -233,8 +233,8 @@ func Listen(network, address string, opts ...Option) (*Listener, error) {
 
 func Dial(network, address string, opts ...Option) (*Conn, error) {
 	var d Dialer
-	d.WriteBufSize = 1024
-	d.ReadBufSize = 1024
+	d.WriteBufSize = DefaultBufferSize
+	d.ReadBufSize = DefaultBufferSize
 	for _, opt := range opts {
 		opt(&d)
 	}

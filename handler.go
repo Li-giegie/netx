@@ -2,28 +2,49 @@ package netx
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
-	"sync"
 )
 
-type Request struct {
-	id uint32
+type Handler interface {
+	// Handle 请求处理函数
+	Handle(r Request, w ResponseWriter)
+}
+
+type Request interface {
+	// Id 请求id
+	Id() uint32
+	// Scanner 返回字节流扫描器
+	Scanner() *Scanner
+	// ReadCloser Read请求流，或关闭请求流
+	io.ReadCloser
+	// BindJSON 请求流绑定到JSON对象
+	BindJSON(a any) error
+	// BindAny 绑定到实现了 Decoder 接口的任意对象
+	BindAny(a Decoder) error
+}
+
+type Response interface {
+	// Id 相应Id
+	Id() uint32
+	// Scanner 返回字节流扫描器
+	Scanner() *Scanner
+	// ReadCloser Read响应流，或关闭响应流
 	io.ReadCloser
 }
 
-func (r *Request) Id() uint32 {
-	return r.id
-}
-
-type Handler interface {
-	Handle(r *Request, w ResponseWriter)
-}
-
 type ResponseWriter interface {
+	// WriteCloser 响应字节流，Write 写入响应字节流，Close响应结束
 	io.WriteCloser
+	// Response 响应字节，每个请求只能响应一次，需要响应字节流请使用Write发送Close关闭
 	Response(data []byte) (int, error)
+	// ResponseString 响应字符串，每个请求只能响应一次，需要响应字节流请使用Write发送Close关闭
 	ResponseString(data string) (int, error)
+	// ResponseJSON 响应JSON编码的字节流
+	ResponseJSON(a any) (int, error)
+	// ResponseAny 响应实现了 Encoder 接口的任意类型
+	ResponseAny(a Encoder) (int, error)
 }
 
 type responseWriter struct {
@@ -84,6 +105,30 @@ func (rw *responseWriter) Response(data []byte) (int, error) {
 	return n, nil
 }
 
+func (rw *responseWriter) ResponseJSON(a any) (int, error) {
+	data, err := json.Marshal(a)
+	if err != nil {
+		return 0, err
+	}
+	return rw.Response(data)
+}
+
+type Encoder interface {
+	Encode() ([]byte, error)
+}
+
+type Decoder interface {
+	Decode([]byte) error
+}
+
+func (rw *responseWriter) ResponseAny(a Encoder) (int, error) {
+	data, err := a.Encode()
+	if err != nil {
+		return 0, err
+	}
+	return rw.Response(data)
+}
+
 const (
 	flagRequest uint8 = 1 << iota
 	flagResponse
@@ -122,32 +167,4 @@ func (p *stream) Decode(data []byte) error {
 	p.seq = binary.LittleEndian.Uint32(data[5:9])
 	p.data = data[9:]
 	return nil
-}
-
-func newPipe() *pipe {
-	r, w := io.Pipe()
-	return &pipe{
-		PipeReader: r,
-		PipeWriter: w,
-	}
-}
-
-type pipe struct {
-	seq uint32
-	*io.PipeReader
-	*io.PipeWriter
-	closeFunc func()
-	sync.Once
-}
-
-func (p *pipe) Read(b []byte) (int, error) {
-	return p.PipeReader.Read(b)
-}
-
-func (p *pipe) Close() (err error) {
-	p.Do(func() {
-		p.closeFunc()
-		err = p.PipeReader.Close()
-	})
-	return
 }

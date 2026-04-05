@@ -2,7 +2,6 @@ package netx
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 )
 
 func TestServer(t *testing.T) {
+	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Ltime)
 	l, err := Listen("tcp", "127.0.0.1:8888")
 	if err != nil {
 		t.Fatal(err)
@@ -29,6 +29,7 @@ func TestServer(t *testing.T) {
 }
 
 func TestClient(t *testing.T) {
+	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Ltime)
 	conn, err := Dial("tcp", "127.0.0.1:8888")
 	if err != nil {
 		t.Fatal(err)
@@ -39,24 +40,28 @@ func TestClient(t *testing.T) {
 		t1 := time.Now()
 		defer func() {
 			log.Println("cost", time.Now().Sub(t1))
-			c.Stop()
+			c.Close()
 		}()
 		wg := sync.WaitGroup{}
-		for i := 0; i < 100000; i++ {
+		for i := 0; i < 2; i++ {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				resp, err := c.Request(context.TODO(), bytes.NewReader([]byte(strconv.Itoa(i))))
+				resp, err := c.Request(context.TODO(), []byte(strconv.Itoa(i)))
+				//resp, err := c.Request(context.TODO(), []byte(strconv.Itoa(i)))
+				//resp, err := c.RequestStream(context.TODO(), bytes.NewReader([]byte(strconv.Itoa(i))))
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				data, err := io.ReadAll(resp)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				_ = data
+				fmt.Println("resp", string(resp))
+				_ = resp
+				//data, err := io.ReadAll(resp)
+				//if err != nil {
+				//	t.Error(err)
+				//	return
+				//}
+				//_ = data
 				//fmt.Println(string(data))
 			}(i)
 		}
@@ -73,13 +78,21 @@ func TestClient(t *testing.T) {
 
 type handler struct{}
 
-func (s handler) Handle(r *Request, w ResponseWriter) {
+func (s handler) Handle(r Request, w ResponseWriter) {
 	defer r.Close()
 	data, err := io.ReadAll(r)
 	if err != nil {
-		log.Println("read err", err)
+		log.Printf("read err %s 1 %v %#v\n", data, err == nil, err)
 		return
 	}
+	log.Println("request", string(data))
+	//fmt.Println(string(data))
+	//w.Write([]byte("response " + string(data)))
+	//w.Write([]byte("1"))
+	//w.Write([]byte("2"))
+	//fmt.Println(w.Write([]byte("3")))
+	//fmt.Println("close", w.Close())
+	//return
 	_, err = w.Response([]byte("收到：" + string(data)))
 	if err != nil {
 		log.Println("write err", err)
@@ -109,7 +122,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 
 type uploadFileHandler struct{}
 
-func (h uploadFileHandler) Handle(r *Request, w ResponseWriter) {
+func (h uploadFileHandler) Handle(r Request, w ResponseWriter) {
 	defer r.Close()
 	br := bufio.NewReader(r)
 	name, err := br.ReadBytes(0)
