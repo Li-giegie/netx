@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"strconv"
 	"testing"
 	"time"
@@ -46,24 +45,6 @@ func TestReader(t *testing.T) {
 		fmt.Println(string(data))
 		data = data[:0]
 	}
-}
-
-func TestWriteForm(t *testing.T) {
-	pr, pw := io.Pipe()
-	go func() {
-		r := NewReader(pr)
-		for {
-			data, err := ReadPacket(r)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			log.Println(string(data))
-		}
-	}()
-	w := NewWriter(pw, NewPool(1024))
-	fmt.Println(w.WriteFrom(bytes.NewBufferString("hello world!!!!!!123123"), 1))
-	time.Sleep(3 * time.Second)
 }
 
 func BenchmarkWriter(b *testing.B) {

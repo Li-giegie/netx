@@ -1,30 +1,20 @@
 package netx
 
-import (
-	"context"
-	"encoding/binary"
-	"io"
-	"sync"
-	"sync/atomic"
-)
-
 func NewServer(l *Listener, h Handler) *Server {
 	return &Server{
-		h:      h,
-		l:      l,
-		respCh: make(map[uint32]chan *Request),
-		conns:  make(map[string]*Conn),
+		h:        h,
+		l:        l,
+		response: newPipeManager(),
+		conns:    newConnManager(),
 	}
 }
 
 type Server struct {
-	h      Handler
-	msgId  uint32
-	respLk sync.RWMutex
-	respCh map[uint32]chan *Request
-	connLk sync.RWMutex
-	conns  map[string]*Conn
-	l      *Listener
+	h        Handler
+	msgId    uint32
+	response *pipeManager
+	conns    *connManager
+	l        *Listener
 }
 
 func (s *Server) Serve() error {
@@ -35,96 +25,96 @@ func (s *Server) Serve() error {
 			return cErr
 		}
 		go func() {
-			s.connLk.Lock()
-			s.conns[conn.RemoteAddr().String()] = conn
-			s.connLk.Unlock()
-
+			s.conns.Set(conn.RemoteAddr().String(), conn)
+			request := newPipeManager()
 			defer func() {
-				s.connLk.Lock()
-				delete(s.conns, conn.RemoteAddr().String())
-				s.connLk.Unlock()
 				conn.Close()
+				s.conns.Del(conn.RemoteAddr().String())
 			}()
-
-			head := make([]byte, 5)
-			readLock := new(sync.Mutex)
 			for {
-				readLock.Lock()
-				_, err := io.ReadFull(conn, head)
+				data, err := ReadPacket(conn)
 				if err != nil {
 					return
 				}
-				id := binary.LittleEndian.Uint32(head[1:])
-				switch head[0] {
-				case typeRequest:
-					go s.h.Handle(&Request{
-						id: id,
-						l:  readLock,
-						c:  conn,
-					}, &Response{
-						id: id,
-						c:  conn,
-					})
-				case typeResponse:
-					s.respLk.RLock()
-					ch, ok := s.respCh[id]
-					if ok {
-						ch <- &Request{
-							id: id,
-							l:  readLock,
-							c:  conn,
+				stm, err := newStream(data)
+				if err != nil {
+					return
+				}
+				if stm.flag&flagRequest != 0 {
+					if stm.seq == 0 {
+						p := newPipe()
+						p.closeFunc = func() {
+							request.Del(stm.id)
 						}
+						p.seq++
+						request.Set(stm.id, p)
+						go s.h.Handle(&Request{id: stm.id, ReadCloser: p}, &responseWriter{w: conn, id: stm.id})
+						if p.Write(stm.data); stm.flag&flagEOF != 0 {
+							p.PipeWriter.Close()
+						}
+						continue
 					}
-					s.respLk.RUnlock()
+					p, ok := request.Get(stm.id)
+					if ok {
+						if p.seq != stm.seq {
+							p.PipeWriter.CloseWithError(ErrStreamSeqInvalid)
+							request.Del(stm.id)
+							continue
+						}
+						if stm.flag&flagERR != 0 {
+							p.PipeWriter.CloseWithError(ErrStreamReadReader)
+							request.Del(stm.id)
+							continue
+						}
+						if len(stm.data) > 0 {
+							p.Write(stm.data)
+						}
+						if stm.flag&flagEOF != 0 {
+							p.PipeWriter.Close()
+							request.Del(stm.id)
+						}
+						p.seq++
+					}
+					continue
+				}
+				if stm.flag&flagResponse != 0 {
+					p, ok := s.response.Get(stm.id)
+					if ok {
+						if p.seq != stm.seq {
+							p.PipeWriter.CloseWithError(ErrStreamSeqInvalid)
+							s.response.Del(stm.id)
+							continue
+						}
+						if stm.flag&flagERR != 0 {
+							p.PipeWriter.CloseWithError(ErrStreamReadReader)
+							s.response.Del(stm.id)
+							continue
+						}
+						if len(stm.data) > 0 {
+							p.PipeWriter.Write(stm.data)
+						}
+						if stm.flag&flagEOF != 0 {
+							p.PipeWriter.Close()
+							s.response.Del(stm.id)
+						}
+						p.seq++
+						continue
+					}
 				}
 			}
 		}()
 	}
 }
 
-func (s *Server) Request(ctx context.Context, conn *Conn, r io.Reader) (io.ReadCloser, error) {
-	ch := make(chan *Request, 1)
-	id := atomic.AddUint32(&s.msgId, 1)
-	s.respLk.Lock()
-	s.respCh[id] = ch
-	s.respLk.Unlock()
-	defer func() {
-		s.respLk.Lock()
-		close(ch)
-		delete(s.respCh, id)
-		s.respLk.Unlock()
-	}()
-	_, err := conn.WriteFrom(&message{
-		typ: typeRequest,
-		id:  id,
-		r:   r,
-	})
-	if err != nil {
-		return nil, err
-	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case resp := <-ch:
-		return resp, nil
-	}
-}
-
-func (s *Server) RangeConn(fn func(addr string, conn *Conn) bool) {
-	s.connLk.RLock()
-	defer s.connLk.RUnlock()
-	for addr, conn := range s.conns {
-		if !fn(addr, conn) {
-			break
-		}
-	}
+func (s *Server) RangeConn(fn func(conn *Conn) bool) {
+	s.conns.RangeConn(fn)
+	return
 }
 
 func (s *Server) Stop() {
-	s.l.Close()
-	s.connLk.Lock()
-	for _, conn := range s.conns {
+	s.conns.RangeConn(func(conn *Conn) bool {
 		conn.Close()
-	}
-	s.connLk.Unlock()
+		return true
+	})
+	s.conns.Clear()
 }

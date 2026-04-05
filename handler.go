@@ -2,100 +2,152 @@ package netx
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
 
-type Handler interface {
-	Handle(r *Request, w *Response)
-}
-
 type Request struct {
-	id       uint32
-	isEOF    bool
-	isClosed bool
-	l        *sync.Mutex
-	c        *Conn
-}
-
-func (r *Request) Id() int {
-	return int(r.id)
-}
-
-var ErrClosed = errors.New("closed")
-
-func (r *Request) Close() (err error) {
-	if !r.isClosed {
-		r.isClosed = true
-		if !r.isEOF {
-			if _, err = io.Copy(io.Discard, r); errors.Is(err, PacketEOF) {
-				err = nil
-			}
-		}
-		return nil
-	}
-	return ErrClosed
-}
-
-func (r *Request) Read(b []byte) (n int, err error) {
-	if r.isClosed {
-		return 0, ErrClosed
-	}
-	if r.isEOF {
-		return 0, io.EOF
-	}
-	if n, err = r.c.Read(b); err != nil {
-		r.l.Unlock()
-		if errors.Is(err, PacketEOF) {
-			r.isEOF = true
-			return n, io.EOF
-		}
-		if err == io.EOF {
-			err = ErrStreamError
-		}
-		return n, err
-	}
-	return n, err
-}
-
-type Response struct {
 	id uint32
-	c  *Conn
+	io.ReadCloser
 }
 
-func (r *Response) Response(rd io.Reader) (int, error) {
-	return r.c.WriteFrom(&message{
-		typ: typeResponse,
-		id:  r.id,
-		r:   rd,
-	})
+func (r *Request) Id() uint32 {
+	return r.id
+}
+
+type Handler interface {
+	Handle(r *Request, w ResponseWriter)
+}
+
+type ResponseWriter interface {
+	io.WriteCloser
+	Response(data []byte) (int, error)
+	ResponseString(data string) (int, error)
+}
+
+type responseWriter struct {
+	w   io.Writer
+	id  uint32
+	seq uint32
+	err error
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if rw.err != nil {
+		return 0, rw.err
+	}
+	p := stream{
+		flag: flagResponse,
+		id:   rw.id,
+		seq:  rw.seq,
+		data: b,
+	}
+	rw.seq++
+	return rw.w.Write(p.Encode())
+}
+func (rw *responseWriter) Close() error {
+	if rw.err != nil {
+		return rw.err
+	}
+	p := stream{
+		flag: flagResponse | flagEOF,
+		id:   rw.id,
+		seq:  rw.seq,
+	}
+	if _, rw.err = rw.w.Write(p.Encode()); rw.err != nil {
+		return rw.err
+	}
+	rw.err = ErrAlreadyResponded
+	return nil
+}
+
+func (rw *responseWriter) ResponseString(data string) (int, error) {
+	return rw.Response([]byte(data))
+}
+
+func (rw *responseWriter) Response(data []byte) (int, error) {
+	if rw.err != nil {
+		return 0, rw.err
+	}
+	p := stream{
+		flag: flagResponse | flagEOF,
+		id:   rw.id,
+		seq:  rw.seq,
+		data: data,
+	}
+	n := 0
+	if n, rw.err = rw.w.Write(p.Encode()); rw.err != nil {
+		return n, rw.err
+	}
+	rw.err = ErrAlreadyResponded
+	return n, nil
 }
 
 const (
-	typeRequest = iota
-	typeResponse
+	flagRequest uint8 = 1 << iota
+	flagResponse
+	flagEOF
+	flagERR
 )
 
-type message struct {
-	typ        uint8
-	isReadHead bool
-	id         uint32
-	r          io.Reader
+func newStream(data []byte) (*stream, error) {
+	p := new(stream)
+	err := p.Decode(data)
+	return p, err
 }
 
-func (m *message) Read(b []byte) (n int, err error) {
-	if len(b) < 5 {
-		return 0, io.ErrShortBuffer
+type stream struct {
+	flag uint8
+	id   uint32
+	seq  uint32
+	data []byte
+}
+
+func (p *stream) Encode() []byte {
+	data := make([]byte, 9+len(p.data))
+	data[0] = p.flag
+	binary.LittleEndian.PutUint32(data[1:5], p.id)
+	binary.LittleEndian.PutUint32(data[5:9], p.seq)
+	copy(data[9:], p.data)
+	return data
+}
+
+func (p *stream) Decode(data []byte) error {
+	if len(data) < 9 {
+		return fmt.Errorf("packet len err")
 	}
-	if !m.isReadHead {
-		m.isReadHead = true
-		b[0] = m.typ
-		binary.LittleEndian.PutUint32(b[1:], m.id)
-		n, err = m.r.Read(b[5:])
-		n += 5
-		return
+	p.flag = data[0]
+	p.id = binary.LittleEndian.Uint32(data[1:5])
+	p.seq = binary.LittleEndian.Uint32(data[5:9])
+	p.data = data[9:]
+	return nil
+}
+
+func newPipe() *pipe {
+	r, w := io.Pipe()
+	return &pipe{
+		PipeReader: r,
+		PipeWriter: w,
 	}
-	n, err = m.r.Read(b)
+}
+
+type pipe struct {
+	seq uint32
+	*io.PipeReader
+	*io.PipeWriter
+	closeFunc func()
+	sync.Once
+}
+
+func (p *pipe) Read(b []byte) (int, error) {
+	return p.PipeReader.Read(b)
+}
+
+func (p *pipe) Close() (err error) {
+	p.Do(func() {
+		p.closeFunc()
+		err = p.PipeReader.Close()
+	})
 	return
 }

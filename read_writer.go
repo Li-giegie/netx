@@ -22,61 +22,19 @@ func NewWriter(w io.Writer, bufPool Pool) *Writer {
 }
 
 type Writer struct {
-	l       sync.RWMutex
 	wr      io.Writer
 	bufPool Pool
 }
 
-const (
-	bytePacket = iota
-	byteStream
-	byteStreamEOF
-	byteStreamError
-)
-
 func (c *Writer) Write(p []byte) (n int, err error) {
-	c.l.RLock()
-	n, err = c.write(p, bytePacket)
-	c.l.RUnlock()
-	return
-}
-
-func (c *Writer) write(p []byte, flag uint8) (n int, err error) {
 	buffer := c.bufPool.Get()
 	*buffer = (*buffer)[:12]
-	rnd := rand.Uint32()<<8 | uint32(flag)
+	rnd := rand.Uint32()
 	binary.LittleEndian.PutUint32((*buffer)[:4], rnd)
 	binary.LittleEndian.PutUint32((*buffer)[4:8], uint32(len(p)))
 	binary.LittleEndian.PutUint32((*buffer)[8:12], uint32(len(p))^rnd)
 	*buffer = append(*buffer, p...)
 	n, err = c.wr.Write(*buffer)
-	c.bufPool.Put(buffer)
-	return
-}
-
-func (c *Writer) WriteFrom(r io.Reader, bufSize int) (n int, err error) {
-	c.l.Lock()
-	buffer := c.bufPool.Get()
-	if len(*buffer) < bufSize {
-		*buffer = make([]byte, bufSize-len(*buffer))
-	}
-	rn := 0
-	for {
-		rn, err = r.Read(*buffer)
-		n += rn
-		if err != nil {
-			if err != io.EOF {
-				c.write((*buffer)[:rn], byteStreamError)
-				break
-			}
-			_, err = c.write((*buffer)[:rn], byteStreamEOF)
-			break
-		}
-		if _, err = c.write((*buffer)[:rn], byteStream); err != nil {
-			break
-		}
-	}
-	c.l.Unlock()
 	c.bufPool.Put(buffer)
 	return
 }
@@ -90,7 +48,6 @@ func NewReader(r io.Reader) *Reader {
 }
 
 type Reader struct {
-	flag uint8
 	size int
 	rd   io.Reader
 	head []byte
@@ -112,7 +69,6 @@ func (c *Reader) Read(b []byte) (int, error) {
 			return 0, InvalidCheckSum
 		}
 		c.size = int(length)
-		c.flag = uint8(rnd)
 	}
 	if len(b) > c.size {
 		b = b[:c.size]
@@ -122,12 +78,7 @@ func (c *Reader) Read(b []byte) (int, error) {
 		n, c.err = c.rd.Read(b)
 	}
 	if c.size -= n; c.size == 0 {
-		if c.flag == bytePacket || c.flag == byteStreamEOF {
-			return n, PacketEOF
-		}
-		if c.flag == byteStreamError {
-			return n, ErrStreamError
-		}
+		return n, PacketEOF
 	}
 	return n, c.err
 }

@@ -3,10 +3,18 @@ package netx
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
 	"time"
+)
+
+var (
+	ErrClosed           = errors.New("closed")
+	ErrAlreadyResponded = errors.New("already responded")
+	ErrStreamSeqInvalid = errors.New("stream seq invalid")
+	ErrStreamReadReader = errors.New("read stream reader error")
 )
 
 func NewConn(conn net.Conn, writeBufSize, readBufSize int) *Conn {
@@ -125,14 +133,6 @@ func (c *Conn) PipeWriter(ch chan []byte, bufferSize int) *PipeWriter {
 
 func (c *Conn) Write(b []byte) (n int, err error) {
 	return c.wr.Write(b)
-}
-
-func (c *Conn) WriteFrom(r io.Reader, bufSizeOpts ...int) (n int, err error) {
-	size := DefaultWriteBufferSize
-	if len(bufSizeOpts) > 0 && bufSizeOpts[0] > 0 {
-		size = bufSizeOpts[0]
-	}
-	return c.wr.WriteFrom(r, size)
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {

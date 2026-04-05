@@ -2,88 +2,144 @@ package netx
 
 import (
 	"context"
-	"encoding/binary"
 	"io"
-	"sync"
 	"sync/atomic"
 )
 
 func NewClient(c *Conn, h Handler) *Client {
 	return &Client{
-		Conn:   c,
-		h:      h,
-		respCh: make(map[uint32]chan *Request),
+		conn:     c,
+		h:        h,
+		response: newPipeManager(),
 	}
 }
 
 type Client struct {
-	*Conn
-	h      Handler
-	msgId  uint32
-	respLk sync.RWMutex
-	respCh map[uint32]chan *Request
+	conn      *Conn
+	h         Handler
+	idCounter uint32
+	response  *pipeManager
 }
 
 func (c *Client) Serve() error {
-	defer c.Close()
-	head := make([]byte, 5)
-	readLock := new(sync.Mutex)
+	defer c.conn.Close()
+	request := newPipeManager()
 	for {
-		readLock.Lock()
-		_, err := io.ReadFull(c.Conn, head)
+		data, err := ReadPacket(c.conn)
 		if err != nil {
 			return err
 		}
-		id := binary.LittleEndian.Uint32(head[1:])
-		switch head[0] {
-		case typeRequest:
-			go c.h.Handle(&Request{
-				id: id,
-				l:  readLock,
-				c:  c.Conn,
-			}, &Response{
-				id: id,
-				c:  c.Conn,
-			})
-		case typeResponse:
-			c.respLk.RLock()
-			ch, ok := c.respCh[id]
-			if ok {
-				ch <- &Request{
-					id: id,
-					l:  readLock,
-					c:  c.Conn,
+		stm, err := newStream(data)
+		if err != nil {
+			return err
+		}
+		if stm.flag&flagRequest != 0 {
+			if stm.seq == 0 {
+				p := newPipe()
+				p.closeFunc = func() {
+					request.Del(stm.id)
 				}
+				p.seq++
+				request.Set(stm.id, p)
+				go c.h.Handle(&Request{id: stm.id, ReadCloser: p}, &responseWriter{w: c.conn, id: stm.id})
+				if p.Write(stm.data); stm.flag&flagEOF != 0 {
+					p.PipeWriter.Close()
+				}
+				continue
 			}
-			c.respLk.RUnlock()
+			p, ok := request.Get(stm.id)
+			if ok {
+				if p.seq != stm.seq {
+					p.PipeWriter.CloseWithError(ErrStreamSeqInvalid)
+					request.Del(stm.id)
+					continue
+				}
+				if stm.flag&flagERR != 0 {
+					p.PipeWriter.CloseWithError(ErrStreamReadReader)
+					request.Del(stm.id)
+					continue
+				}
+				if len(stm.data) > 0 {
+					p.Write(stm.data)
+				}
+				if stm.flag&flagEOF != 0 {
+					p.PipeWriter.Close()
+					request.Del(stm.id)
+				}
+				p.seq++
+			}
+			continue
+		}
+		if stm.flag&flagResponse != 0 {
+			p, ok := c.response.Get(stm.id)
+			if ok {
+				if p.seq != stm.seq {
+					p.PipeWriter.CloseWithError(ErrStreamSeqInvalid)
+					c.response.Del(stm.id)
+					continue
+				}
+				if stm.flag&flagERR != 0 {
+					p.PipeWriter.CloseWithError(ErrStreamReadReader)
+					c.response.Del(stm.id)
+					continue
+				}
+				if len(stm.data) > 0 {
+					p.PipeWriter.Write(stm.data)
+				}
+				if stm.flag&flagEOF != 0 {
+					c.response.Del(stm.id)
+					p.PipeWriter.Close()
+				}
+				p.seq++
+				continue
+			}
 		}
 	}
 }
 
+func (c *Client) Write(data []byte) (int, error) {
+	return c.conn.Write((&stream{
+		flag: flagRequest | flagEOF,
+		id:   atomic.AddUint32(&c.idCounter, 1),
+		data: data,
+	}).Encode())
+}
+
 func (c *Client) Request(ctx context.Context, r io.Reader) (io.ReadCloser, error) {
-	ch := make(chan *Request, 1)
-	id := atomic.AddUint32(&c.msgId, 1)
-	c.respLk.Lock()
-	c.respCh[id] = ch
-	c.respLk.Unlock()
-	defer func() {
-		c.respLk.Lock()
-		close(ch)
-		delete(c.respCh, id)
-		c.respLk.Unlock()
-	}()
-	_, err := c.WriteFrom(&message{
-		typ: typeRequest,
-		id:  id,
-		r:   r,
-	})
-	if err != nil {
-		return nil, err
+	p := newPipe()
+	id := atomic.AddUint32(&c.idCounter, 1)
+	p.closeFunc = func() {
+		c.response.Del(id)
 	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case resp := <-ch:
-		return resp, nil
+	c.response.Set(id, p)
+	buf := make([]byte, 4096)
+	packet := &stream{
+		flag: flagRequest,
+		id:   id,
 	}
+	for {
+		n, err := r.Read(buf)
+		packet.data = buf[:n]
+		if err != nil {
+			if err != io.EOF {
+				packet.flag |= flagERR
+				c.conn.Write(packet.Encode())
+				return nil, err
+			}
+			packet.flag |= flagEOF
+			if _, err = c.conn.Write(packet.Encode()); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if _, err = c.conn.Write(packet.Encode()); err != nil {
+			return nil, err
+		}
+		packet.seq++
+	}
+	return p, nil
+}
+
+func (c *Client) Stop() error {
+	return c.conn.Close()
 }
