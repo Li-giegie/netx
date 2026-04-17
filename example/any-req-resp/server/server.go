@@ -1,24 +1,28 @@
 package main
 
 import (
-	"git.com/Li-giegie/netx"
-	any_req_resp "git.com/Li-giegie/netx/example/any-req-resp"
+	"github.com/Li-giegie/netx"
+	any_req_resp "github.com/Li-giegie/netx/example/any-req-resp"
 	"log"
 )
 
 type Handler struct{}
 
 func (h Handler) Handle(r netx.Request, w netx.ResponseWriter) {
-	defer r.Close()
+	defer func() {
+		r.Close()
+		w.Close()
+	}()
+
 	var param any_req_resp.Api
 	err := r.BindAny(&param)
 	if err != nil {
 		log.Println("bind error:", err)
-		w.ResponseString("bind error " + err.Error())
+		w.WriteString("bind error " + err.Error())
 		return
 	}
 	log.Printf("param %#v\n", param)
-	w.ResponseAny(&param)
+	w.WriteAny(&param)
 }
 
 func main() {

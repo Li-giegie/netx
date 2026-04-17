@@ -1,7 +1,7 @@
 package stream
 
 import (
-	"git.com/Li-giegie/netx"
+	"github.com/Li-giegie/netx"
 	"io"
 	"log"
 )
@@ -16,5 +16,5 @@ func (h EchoHandler) Handle(r netx.Request, w netx.ResponseWriter) {
 		return
 	}
 	log.Println("Request:", string(data))
-	w.Response(data)
+	w.WriteClose(data)
 }

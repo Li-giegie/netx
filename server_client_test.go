@@ -1,17 +1,13 @@
 package netx
 
 import (
-	"bufio"
+	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestServer(t *testing.T) {
@@ -21,7 +17,7 @@ func TestServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	s := NewServer(l, handler{})
+	s := NewServer(l, EchoHandler{})
 	if err = s.Serve(); err != nil {
 		t.Error(err)
 		return
@@ -35,39 +31,98 @@ func TestClient(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	c := NewClient(conn, handler{})
+	c := NewClient(conn, EchoHandler{})
 	go func() {
-		t1 := time.Now()
-		defer func() {
-			log.Println("cost", time.Now().Sub(t1))
-			c.Close()
-		}()
-		wg := sync.WaitGroup{}
-		for i := 0; i < 2; i++ {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				resp, err := c.Request(context.TODO(), []byte(strconv.Itoa(i)))
-				//resp, err := c.Request(context.TODO(), []byte(strconv.Itoa(i)))
-				//resp, err := c.RequestStream(context.TODO(), bytes.NewReader([]byte(strconv.Itoa(i))))
+		defer c.Close()
+		testFunc := map[string]func(t2 *testing.T){
+			"Request": func(t *testing.T) {
+				data, err := c.Request(context.TODO(), []byte("Request"))
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				fmt.Println("resp", string(resp))
-				_ = resp
-				//data, err := io.ReadAll(resp)
-				//if err != nil {
-				//	t.Error(err)
-				//	return
-				//}
-				//_ = data
-				//fmt.Println(string(data))
-			}(i)
+				if string(data) != "Request" {
+					t.Error("Err: " + string(data))
+					return
+				}
+			},
+			"RequestInStream": func(t *testing.T) {
+				data, err := c.RequestInStream(context.TODO(), bytes.NewReader([]byte("RequestInStream")))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if string(data) != "RequestInStream" {
+					t.Error("Err: " + string(data))
+					return
+				}
+			},
+			"RequestOutStream": func(t *testing.T) {
+				resp, err := c.RequestOutStream(context.TODO(), []byte("RequestOutStream"))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer resp.Close()
+				data, err := resp.Scanner().ScanAll()
+				if string(data) != "RequestOutStream" {
+					t.Error("Err: " + string(data))
+					return
+				}
+			},
+			"RequestStream": func(t *testing.T) {
+				resp, err := c.RequestStream(context.TODO(), bytes.NewReader([]byte("RequestStream")))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer resp.Close()
+				data, err := resp.Scanner().ScanAll()
+				if string(data) != "RequestStream" {
+					t.Error("Err: " + string(data))
+					return
+				}
+			},
+			"RequestWriter": func(t *testing.T) {
+				writer, response := c.RequestWriter()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if _, err = writer.WriteClose([]byte("RequestWriter")); err != nil {
+					t.Error(err)
+					return
+				}
+				defer response.Close()
+				data, err := response.Scanner().ScanAll()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if string(data) != "RequestWriter" {
+					t.Error("Err: " + string(data))
+					return
+				}
+			},
+			"RequestJSON": func(t *testing.T) {
+				var data string
+				err := c.RequestJSON(context.TODO(), "RequestJSON", &data)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if data != "RequestJSON" {
+					t.Error("Err: " + string(data))
+					return
+				}
+			},
 		}
-
-		wg.Wait()
-
+		for s, f := range testFunc {
+			if !t.Run(s, f) {
+				t.Error("Err: ", s)
+				return
+			}
+		}
 	}()
 	err = c.Serve()
 	if err != nil {
@@ -76,74 +131,48 @@ func TestClient(t *testing.T) {
 	}
 }
 
-type handler struct{}
+func BenchmarkClientRequest(b *testing.B) {
+	conn, err := Dial("tcp", "127.0.0.1:8888")
+	if err != nil {
+		b.Error(err)
+		return
+	}
+	c := NewClient(conn, EchoHandler{})
+	go c.Serve()
+	defer c.Close()
+	b.ResetTimer()
+	var wg sync.WaitGroup
+	for i := 0; i < b.N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := c.Request(context.TODO(), []byte(strconv.Itoa(i)))
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			_ = resp
+		}()
+	}
+	wg.Wait()
+}
 
-func (s handler) Handle(r Request, w ResponseWriter) {
+type EchoHandler struct{}
+
+func (s EchoHandler) Handle(r Request, w ResponseWriter) {
 	defer r.Close()
 	data, err := io.ReadAll(r)
 	if err != nil {
 		log.Printf("read err %s 1 %v %#v\n", data, err == nil, err)
 		return
 	}
-	log.Println("request", string(data))
-	//fmt.Println(string(data))
-	//w.Write([]byte("response " + string(data)))
-	//w.Write([]byte("1"))
-	//w.Write([]byte("2"))
-	//fmt.Println(w.Write([]byte("3")))
-	//fmt.Println("close", w.Close())
-	//return
-	_, err = w.Response([]byte("收到：" + string(data)))
-	if err != nil {
-		log.Println("write err", err)
-		return
-	}
-}
-
-type file struct {
-	*os.File
-	isReadName bool
-}
-
-func (f *file) Read(p []byte) (n int, err error) {
-	if !f.isReadName {
-		name := filepath.Base(f.Name())
-		if len(p) <= len(name) {
-			return 0, io.ErrShortBuffer
-		}
-		n = copy(p, name)
-		p[n] = 0
-		f.isReadName = true
-		n2, err := f.File.Read(p[n+1:])
-		return n + 1 + n2, err
-	}
-	return f.File.Read(p)
-}
-
-type uploadFileHandler struct{}
-
-func (h uploadFileHandler) Handle(r Request, w ResponseWriter) {
-	defer r.Close()
-	br := bufio.NewReader(r)
-	name, err := br.ReadBytes(0)
-	if err != nil {
-		log.Println("read err", err)
-		w.ResponseString("read err " + err.Error())
-		return
-	}
-	file, err := os.Create(string(name[:len(name)-1]))
-	if err != nil {
-		log.Println("create err", err)
-		w.ResponseString("create file err " + err.Error())
-		return
-	}
-	defer file.Close()
-	_, err = io.Copy(file, br)
-	if err != nil {
-		log.Println("copy err", err)
-		w.ResponseString("copy err " + err.Error())
-		return
-	}
-	log.Println("upload file ok")
-	fmt.Println(w.ResponseString("upload file ok "))
+	w.WriteString("1")
+	w.WriteString("2")
+	w.WriteString("3")
+	w.Close()
+	//log.Println("receive:", string(data))
+	//if _, err = w.WriteClose(data); err != nil {
+	//	log.Println("write err", err)
+	//	return
+	//}
 }

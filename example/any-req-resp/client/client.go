@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"git.com/Li-giegie/netx"
-	any_req_resp "git.com/Li-giegie/netx/example/any-req-resp"
-	"git.com/Li-giegie/netx/example/stream"
+	"github.com/Li-giegie/netx"
+	any_req_resp "github.com/Li-giegie/netx/example/any-req-resp"
+	"github.com/Li-giegie/netx/example/stream"
 	"log"
 )
 

@@ -3,8 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
-	"git.com/Li-giegie/netx"
-	"git.com/Li-giegie/netx/example/stream"
+	"github.com/Li-giegie/netx"
+	"github.com/Li-giegie/netx/example/stream"
 	"log"
 	"os"
 )

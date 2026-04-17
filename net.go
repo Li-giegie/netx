@@ -17,7 +17,7 @@ const (
 )
 
 var (
-	ErrAlreadyResponded = errors.New("already responded")
+	ErrClosed           = errors.New("closed")
 	ErrStreamSeqInvalid = errors.New("stream seq invalid")
 	ErrStreamReadReader = errors.New("read stream reader error")
 )

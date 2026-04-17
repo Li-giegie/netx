@@ -36,6 +36,13 @@ func (c *Writer) Write(p []byte) (n int, err error) {
 	*buffer = append(*buffer, p...)
 	n, err = c.wr.Write(*buffer)
 	c.bufPool.Put(buffer)
+	if err != nil {
+		if n -= 12; n < 0 {
+			n = 0
+		}
+		return
+	}
+	n -= 12
 	return
 }
 

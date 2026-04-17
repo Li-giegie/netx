@@ -50,44 +50,45 @@ func (c *connManager) Clear() {
 	c.l.Unlock()
 }
 
-func newRequestResponseManager() *requestResponseManager {
-	return &requestResponseManager{
-		m: make(map[uint32]*requestResponse),
+func newStreamManager() *streamManager {
+	return &streamManager{
+		m: make(map[uint32]*stream),
 	}
 }
 
-type requestResponseManager struct {
-	m map[uint32]*requestResponse
+type streamManager struct {
+	m map[uint32]*stream
 	l sync.RWMutex
 }
 
-func (p *requestResponseManager) Set(k uint32, v *requestResponse) {
+func (p *streamManager) Set(k uint32, v *stream) {
 	p.l.Lock()
 	p.m[k] = v
 	p.l.Unlock()
 }
 
-func (p *requestResponseManager) Get(k uint32) (*requestResponse, bool) {
+func (p *streamManager) Get(k uint32) (*stream, bool) {
 	p.l.RLock()
 	v, ok := p.m[k]
 	p.l.RUnlock()
 	return v, ok
 }
 
-func (p *requestResponseManager) Del(k uint32) {
+func (p *streamManager) Del(k uint32) {
 	p.l.Lock()
 	delete(p.m, k)
 	p.l.Unlock()
 }
 
-func newRequestResponse() *requestResponse {
-	return &requestResponse{
-		r: make(chan []byte, 1),
+func newStream(id uint32) *stream {
+	return &stream{
+		id: id,
+		r:  make(chan []byte, 1),
 	}
 }
 
 type Scanner struct {
-	r *requestResponse
+	r *stream
 }
 
 // Scan 扫描请求字节流，并报告是否可以下一次扫描，当next = true、seq = 1、err = io.EOF 时，说明请求字节流已经读完，可以立即结束扫描，如果不结束下一次读取next返回false
@@ -129,7 +130,7 @@ func (s *Scanner) ScanAll() (b []byte, err error) {
 	return
 }
 
-type requestResponse struct {
+type stream struct {
 	id        uint32
 	seq       uint32
 	closeFunc func()
@@ -142,17 +143,17 @@ type requestResponse struct {
 }
 
 // Id 返回请求id
-func (r *requestResponse) Id() uint32 {
+func (r *stream) Id() uint32 {
 	return r.id
 }
 
 // Scanner 返回一个扫描器，后续的请求字节流从扫描器中获取
-func (r *requestResponse) Scanner() *Scanner {
+func (r *stream) Scanner() *Scanner {
 	return &Scanner{r: r}
 }
 
 // Read 返回请求字节流
-func (r *requestResponse) Read(b []byte) (n int, err error) {
+func (r *stream) Read(b []byte) (n int, err error) {
 	if r.i != len(r.data) {
 		n = copy(b, r.data[r.i:])
 		r.i += n
@@ -168,7 +169,7 @@ func (r *requestResponse) Read(b []byte) (n int, err error) {
 	return
 }
 
-func (r *requestResponse) BindJSON(a any) error {
+func (r *stream) BindJSON(a any) error {
 	data, err := r.Scanner().ScanAll()
 	if err != nil {
 		return err
@@ -176,7 +177,7 @@ func (r *requestResponse) BindJSON(a any) error {
 	return json.Unmarshal(data, a)
 }
 
-func (r *requestResponse) BindAny(a Decoder) error {
+func (r *stream) BindAny(a Decoder) error {
 	data, err := r.Scanner().ScanAll()
 	if err != nil {
 		return err
@@ -185,11 +186,11 @@ func (r *requestResponse) BindAny(a Decoder) error {
 }
 
 // Close 关闭请求字节流
-func (r *requestResponse) Close() error {
+func (r *stream) Close() error {
 	return r.closeWithError(io.ErrClosedPipe)
 }
 
-func (r *requestResponse) write(b []byte) (n int, err error) {
+func (r *stream) write(b []byte) (n int, err error) {
 	r.l.Lock()
 	defer r.l.Unlock()
 	if r.err != nil {
@@ -199,7 +200,7 @@ func (r *requestResponse) write(b []byte) (n int, err error) {
 	return len(b), nil
 }
 
-func (r *requestResponse) writeEOF(b []byte) (int, error) {
+func (r *stream) writeEOF(b []byte) (int, error) {
 	r.l.Lock()
 	defer r.l.Unlock()
 	if r.err != nil {
@@ -216,7 +217,7 @@ func (r *requestResponse) writeEOF(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (r *requestResponse) closeWithError(e error) error {
+func (r *stream) closeWithError(e error) error {
 	r.l.Lock()
 	defer r.l.Unlock()
 	if r.err != nil {
@@ -251,4 +252,119 @@ func or[T any](args ...*orArg[T]) T {
 		}
 	}
 	panic("must have a value is true")
+}
+
+type iRequestResponseWriter interface {
+	Id() uint32
+	// Write 写入字节流，不能并发调用
+	Write([]byte) (int, error)
+	// Close 关闭字节流写入，关闭后不可再写入
+	Close() error
+	// CloseWithError 异常关闭字节流发送，并报告对端本次发送异常
+	CloseWithError(e error) error
+	// WriteClose 写入后立即关闭，相当于 Write + Close
+	WriteClose([]byte) (int, error)
+	// WriteString 写入String
+	WriteString(s string) (n int, err error)
+	// WriteJSON 写入JSON
+	WriteJSON(v any) (n int, err error)
+	// WriteAny 写入实现了 Encoder 接口的任意类型
+	WriteAny(v Encoder) (n int, err error)
+}
+
+type requestResponseWriter struct {
+	flag uint8
+	id   uint32
+	seq  uint32
+	err  error
+	conn *ConnX
+}
+
+func (r *requestResponseWriter) Id() uint32 {
+	return r.id
+}
+
+func (r *requestResponseWriter) Write(p []byte) (n int, err error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	n, err = r.conn.writeChunk(&chunk{
+		flag: r.flag,
+		id:   r.id,
+		seq:  r.seq,
+		data: p,
+	})
+	r.seq++
+	return
+}
+
+func (r *requestResponseWriter) Close() (err error) {
+	if r.err != nil {
+		return r.err
+	}
+	_, err = r.conn.writeChunk(&chunk{
+		flag: r.flag | flagEOF,
+		id:   r.id,
+		seq:  r.seq,
+	})
+	r.err = ErrClosed
+	return
+}
+
+func (r *requestResponseWriter) CloseWithError(e error) error {
+	if e == nil {
+		return r.Close()
+	}
+	if r.err != nil {
+		return r.err
+	}
+	_, err := r.conn.writeChunk(&chunk{
+		flag: r.flag | flagERR,
+		id:   r.id,
+		seq:  r.seq,
+	})
+	if err != nil {
+		r.err = err
+		return r.err
+	}
+	r.err = e
+	return nil
+}
+
+func (r *requestResponseWriter) WriteClose(p []byte) (n int, err error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	n, err = r.conn.writeChunk(&chunk{
+		flag: r.flag | flagEOF,
+		id:   r.id,
+		seq:  r.seq,
+		data: p,
+	})
+	if err != nil {
+		r.err = err
+		return
+	}
+	r.err = ErrClosed
+	return
+}
+
+func (r *requestResponseWriter) WriteString(s string) (n int, err error) {
+	return r.Write([]byte(s))
+}
+
+func (r *requestResponseWriter) WriteJSON(v any) (n int, err error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return 0, err
+	}
+	return r.Write(data)
+}
+
+func (r *requestResponseWriter) WriteAny(v Encoder) (n int, err error) {
+	data, err := v.Encode()
+	if err != nil {
+		return 0, err
+	}
+	return r.Write(data)
 }

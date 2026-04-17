@@ -4,7 +4,7 @@ func NewServer(l *Listener, h Handler) *Server {
 	return &Server{
 		h:        h,
 		l:        l,
-		response: newRequestResponseManager(),
+		response: newStreamManager(),
 		conns:    newConnManager(),
 	}
 }
@@ -12,7 +12,7 @@ func NewServer(l *Listener, h Handler) *Server {
 type Server struct {
 	h         Handler
 	idCounter uint32
-	response  *requestResponseManager
+	response  *streamManager
 	conns     *connManager
 	l         *Listener
 }
@@ -27,7 +27,7 @@ func (s *Server) Serve() error {
 		go func() {
 			conn := &ConnX{
 				idCounter: &s.idCounter,
-				response:  newRequestResponseManager(),
+				response:  newStreamManager(),
 				conn:      conn,
 				h:         s.h,
 			}
