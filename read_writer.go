@@ -10,7 +10,6 @@ import (
 
 var (
 	InvalidCheckSum = errors.New("read packet err:invalid checksum")
-	ErrStreamError  = errors.New("read stream error")
 	PacketEOF       = errors.New("packet EOF")
 )
 

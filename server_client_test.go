@@ -1,178 +1,239 @@
 package netx
 
 import (
-	"bytes"
-	"context"
 	"io"
 	"log"
-	"strconv"
-	"sync"
 	"testing"
 )
 
 func TestServer(t *testing.T) {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Ltime)
-	l, err := Listen("tcp", "127.0.0.1:8888")
+	srv, err := Listen("tcp", "127.0.0.1:8888")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
-	s := NewServer(l, EchoHandler{})
-	if err = s.Serve(); err != nil {
-		t.Error(err)
-		return
-	}
+	defer srv.Stop()
+	log.Println("server started")
+	err = srv.Serve(&Echo{})
+	log.Println("start server err:", err)
 }
 
-func TestClient(t *testing.T) {
+func TestConn(t *testing.T) {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Ltime)
 	conn, err := Dial("tcp", "127.0.0.1:8888")
 	if err != nil {
 		t.Fatal(err)
 		return
 	}
-	c := NewClient(conn, EchoHandler{})
+	defer conn.Stop()
+	log.Println("conn started")
 	go func() {
-		defer c.Close()
-		testFunc := map[string]func(t2 *testing.T){
-			"Request": func(t *testing.T) {
-				data, err := c.Request(context.TODO(), []byte("Request"))
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if string(data) != "Request" {
-					t.Error("Err: " + string(data))
-					return
-				}
-			},
-			"RequestInStream": func(t *testing.T) {
-				data, err := c.RequestInStream(context.TODO(), bytes.NewReader([]byte("RequestInStream")))
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if string(data) != "RequestInStream" {
-					t.Error("Err: " + string(data))
-					return
-				}
-			},
-			"RequestOutStream": func(t *testing.T) {
-				resp, err := c.RequestOutStream(context.TODO(), []byte("RequestOutStream"))
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				defer resp.Close()
-				data, err := resp.Scanner().ScanAll()
-				if string(data) != "RequestOutStream" {
-					t.Error("Err: " + string(data))
-					return
-				}
-			},
-			"RequestStream": func(t *testing.T) {
-				resp, err := c.RequestStream(context.TODO(), bytes.NewReader([]byte("RequestStream")))
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				defer resp.Close()
-				data, err := resp.Scanner().ScanAll()
-				if string(data) != "RequestStream" {
-					t.Error("Err: " + string(data))
-					return
-				}
-			},
-			"RequestWriter": func(t *testing.T) {
-				writer, response := c.RequestWriter()
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if _, err = writer.WriteClose([]byte("RequestWriter")); err != nil {
-					t.Error(err)
-					return
-				}
-				defer response.Close()
-				data, err := response.Scanner().ScanAll()
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if string(data) != "RequestWriter" {
-					t.Error("Err: " + string(data))
-					return
-				}
-			},
-			"RequestJSON": func(t *testing.T) {
-				var data string
-				err := c.RequestJSON(context.TODO(), "RequestJSON", &data)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if data != "RequestJSON" {
-					t.Error("Err: " + string(data))
-					return
-				}
-			},
+		defer conn.Stop()
+		session, err := conn.Session()
+		if err != nil {
+			t.Error(err)
+			return
 		}
-		for s, f := range testFunc {
-			if !t.Run(s, f) {
-				t.Error("Err: ", s)
+		defer session.SessionReader.Close()
+		_, err = session.SessionWriter.Write([]byte("hello world"))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err = session.SessionWriter.Close(); err != nil {
+			t.Error(err)
+			return
+		}
+		for {
+			data, err := session.SessionReader.ReadChunk()
+			if err != nil {
+				log.Println("read err", err)
 				return
 			}
+			log.Println(string(data))
 		}
 	}()
-	err = c.Serve()
+	err = conn.Serve(&Echo{})
 	if err != nil {
 		t.Fatal(err)
 		return
 	}
+	log.Println("conn closed")
 }
 
-func BenchmarkClientRequest(b *testing.B) {
-	conn, err := Dial("tcp", "127.0.0.1:8888")
+func TestServerBench(t *testing.T) {
+	srv, err := Listen("tcp", "127.0.0.1:8888", Config{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+	})
 	if err != nil {
-		b.Error(err)
+		t.Error(err)
 		return
 	}
-	c := NewClient(conn, EchoHandler{})
-	go c.Serve()
-	defer c.Close()
+	defer srv.Stop()
+	err = srv.Serve(bench{})
+	log.Println("serve err: -2", err)
+}
+
+func BenchmarkConn(b *testing.B) {
+	conn, err := Dial("tcp", "127.0.0.1:8888", Config{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+	})
+	if err != nil {
+		b.Fatal(err)
+		return
+	}
+	defer func() {
+		conn.Stop()
+	}()
+	go func() {
+		err = conn.Serve(bench{})
+		if err != nil {
+			b.Error(err)
+		}
+	}()
 	b.ResetTimer()
-	var wg sync.WaitGroup
 	for i := 0; i < b.N; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			resp, err := c.Request(context.TODO(), []byte(strconv.Itoa(i)))
-			if err != nil {
-				b.Error(err)
-				return
+		session, err := conn.Session()
+		if err != nil {
+			b.Error("create session err", err)
+			return
+		}
+		_, err = session.WriteClose([]byte("hello world"))
+		if err != nil {
+			b.Error("write session err", err)
+			return
+		}
+		for {
+			if _, err = session.SessionReader.ReadChunk(); err != nil {
+				if err != io.EOF {
+					b.Error("read session err", err)
+					break
+				}
+				break
 			}
-			_ = resp
-		}()
+		}
+		session.SessionReader.Close()
 	}
-	wg.Wait()
 }
 
-type EchoHandler struct{}
-
-func (s EchoHandler) Handle(r Request, w ResponseWriter) {
-	defer r.Close()
-	data, err := io.ReadAll(r)
+func BenchmarkConnS2(b *testing.B) {
+	conn, err := Dial("tcp", "127.0.0.1:8888", Config{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+	})
 	if err != nil {
-		log.Printf("read err %s 1 %v %#v\n", data, err == nil, err)
+		b.Fatal(err)
 		return
 	}
-	w.WriteString("1")
-	w.WriteString("2")
-	w.WriteString("3")
-	w.Close()
-	//log.Println("receive:", string(data))
-	//if _, err = w.WriteClose(data); err != nil {
-	//	log.Println("write err", err)
-	//	return
-	//}
+	defer func() {
+		conn.Stop()
+	}()
+	go func() {
+		err = conn.Serve(bench{})
+		if err != nil {
+			b.Error(err)
+		}
+	}()
+	b.ResetTimer()
+	session, err := conn.Session()
+	if err != nil {
+		b.Error("create session err", err)
+		return
+	}
+	defer func() {
+		session.SessionWriter.Close()
+		session.SessionReader.Close()
+	}()
+
+	for i := 0; i < b.N; i++ {
+		_, err := session.Write([]byte("hello world"))
+		if err != nil {
+			b.Error("write session err", err)
+			return
+		}
+		if _, err = session.SessionReader.ReadChunk(); err != nil {
+			if err != io.EOF {
+				b.Error("read session err", err)
+				break
+			}
+			break
+		}
+	}
+}
+
+func BenchmarkConnS3(b *testing.B) {
+	conn, err := Dial("tcp", "127.0.0.1:8888", Config{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+	})
+	if err != nil {
+		b.Fatal(err)
+		return
+	}
+	defer func() {
+		conn.Stop()
+	}()
+	go func() {
+		err = conn.Serve(bench{})
+		if err != nil {
+			b.Error(err)
+		}
+	}()
+	b.ResetTimer()
+	session, err := conn.Session()
+	if err != nil {
+		b.Error("create session err", err)
+		return
+	}
+	defer func() {
+		session.SessionWriter.Close()
+		session.SessionReader.Close()
+	}()
+	go io.Copy(io.Discard, session.SessionReader)
+	for i := 0; i < b.N; i++ {
+		_, err := session.Write([]byte("hello world"))
+		if err != nil {
+			b.Error("write session err", err)
+			return
+		}
+	}
+}
+
+// BenchmarkConn-12           18382             65008 ns/op            1375 B/op         10 allocs/op
+// BenchmarkConnS2-12         25860             46237 ns/op             529 B/op          2 allocs/op
+// BenchmarkConnS3-12        112328             12936 ns/op             493 B/op          1 allocs/op
+type Echo struct{}
+
+func (e Echo) Handle(r *SessionReader, w *SessionWriter) {
+	defer w.Close()
+	for {
+		data, err := r.ReadChunk()
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		log.Println("data:", string(data))
+		w.Write(data)
+	}
+}
+
+type bench struct{}
+
+func (bench) Handle(r *SessionReader, w *SessionWriter) {
+	defer func() {
+		w.Close()
+		r.Close()
+	}()
+	for {
+		data, err := r.ReadChunk()
+		if err != nil {
+			if err != io.EOF {
+				log.Println(err)
+			}
+			return
+		}
+		w.Write(data)
+	}
 }
