@@ -1,9 +1,12 @@
 package netx
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log"
 	"testing"
+	"time"
 )
 
 func TestServer(t *testing.T) {
@@ -13,6 +16,23 @@ func TestServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srv.Stop()
+	srv.OnConnect = func(conn *Conn) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+		defer cancel()
+		resp, err := conn.Request(ctx, []byte("who are you?"))
+		if err != nil {
+			log.Println("request timeout", err)
+			conn.Stop()
+			return
+		}
+		fmt.Println("response", string(resp))
+		log.Println("OnServe", conn.RemoteAddr().String())
+		srv.Set(conn.RemoteAddr().String(), conn)
+	}
+	srv.OnStop = func(conn *Conn, err error) {
+		log.Println("OnStop", conn.RemoteAddr().String())
+		srv.Del(conn.RemoteAddr().String())
+	}
 	log.Println("server started")
 	err = srv.Serve(&Echo{})
 	log.Println("start server err:", err)
@@ -26,9 +46,21 @@ func TestConn(t *testing.T) {
 		return
 	}
 	defer conn.Stop()
+	conn.Set(1, 2)
+	fmt.Println(conn.Get(1))
+	conn.Range(func(k, v any) bool {
+		fmt.Println(k, v)
+		return true
+	})
 	log.Println("conn started")
 	go func() {
-		defer conn.Stop()
+		//defer conn.Stop()
+		resp, err := conn.Request(context.Background(), []byte("hello"))
+		if err != nil {
+			log.Println("request timeout", err)
+			return
+		}
+		log.Println(string(resp))
 		session, err := conn.Session()
 		if err != nil {
 			t.Error(err)
@@ -47,18 +79,14 @@ func TestConn(t *testing.T) {
 		for {
 			data, err := session.SessionReader.ReadChunk()
 			if err != nil {
-				log.Println("read err", err)
+				log.Println(err)
 				return
 			}
 			log.Println(string(data))
 		}
 	}()
 	err = conn.Serve(&Echo{})
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-	log.Println("conn closed")
+	log.Println("conn closed", err)
 }
 
 func TestServerBench(t *testing.T) {

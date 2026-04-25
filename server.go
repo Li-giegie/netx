@@ -2,8 +2,8 @@ package netx
 
 import (
 	"context"
+	"errors"
 	"net"
-	"sync"
 )
 
 func Listen(network, addr string, opt ...Config) (*Server, error) {
@@ -28,75 +28,60 @@ func NewServer(l net.Listener, opt ...Config) *Server {
 		}
 	}
 	return &Server{
-		respSession: newSessionManager(),
-		conns:       newConnManager(),
-		conf:        c,
-		listener:    l,
+		conf:     c,
+		listener: l,
 	}
 }
 
 type Server struct {
 	ctx         context.Context
-	cancel      context.CancelFunc
+	cancel      context.CancelCauseFunc
 	idCounter   uint32
 	respSession *sessionManager
-	conns       *connManager
 	conf        Config
 	listener    net.Listener
-	once        sync.Once
+	// 并发安全的状态存储器
+	storage
+	// OnConnect 新建连接第一个回调函数，异步执行
+	OnConnect func(conn *Conn)
+	// OnStop 连接断开时触发的回调 conn 连接 err 断开原因
+	OnStop func(conn *Conn, err error)
 }
 
 func (s *Server) Serve(h Handler) error {
-	s.once = sync.Once{}
-	s.ctx, s.cancel = context.WithCancel(context.TODO())
-	ctx, cancel := context.WithCancelCause(s.ctx)
+	s.respSession = newSessionManager()
+	s.ctx, s.cancel = context.WithCancelCause(context.TODO())
 	defer func() {
 		s.listener.Close()
-		s.cancel()
-		cancel(nil)
+		s.storage.Clear()
 	}()
 	go func() {
-		var err error
-		defer func() {
-			cancel(err)
-		}()
 		for {
-			var conn net.Conn
-			conn, err = s.listener.Accept()
+			conn, err := s.listener.Accept()
 			if err != nil {
+				s.cancel(err)
 				return
 			}
 			go func() {
 				conn := NewConn(conn, &s.conf)
-				s.conns.Set(conn.conn.RemoteAddr().String(), conn)
-				defer func() {
-					conn.Stop()
-					s.conns.Del(conn.conn.RemoteAddr().String())
-				}()
-				conn.Serve(h)
+				if s.OnConnect != nil {
+					go s.OnConnect(conn)
+				}
+				srvErr := conn.Serve(h)
+				if s.OnStop != nil {
+					s.OnStop(conn, srvErr)
+				}
 			}()
 		}
 	}()
-	select {
-	case <-s.ctx.Done():
+	<-s.ctx.Done()
+	err := context.Cause(s.ctx)
+	if errors.Is(err, context.Canceled) {
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
-}
-
-func (s *Server) RangeConn(fn func(conn *Conn) bool) {
-	s.conns.RangeConn(fn)
-	return
+	return err
 }
 
 func (s *Server) Stop() {
-	s.once.Do(func() {
-		s.cancel()
-		s.conns.RangeConn(func(conn *Conn) bool {
-			conn.Stop()
-			return true
-		})
-		s.conns.Clear()
-	})
+	s.cancel(nil)
 }

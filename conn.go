@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -69,44 +70,44 @@ func Dial(network, addr string, opt ...Config) (*Conn, error) {
 
 func NewConn(conn net.Conn, c *Config) *Conn {
 	return &Conn{
-		idCounter:   new(uint32),
-		respSession: newSessionManager(),
-		reqSessions: newSessionManager(),
-		conn:        conn,
-		rd:          NewReader(bufio.NewReaderSize(conn, c.ReadBufferSize)),
-		wr:          NewWriter(conn, NewPool(c.WriteBufferSize)),
+		conn: conn,
+		rd:   NewReader(bufio.NewReaderSize(conn, c.ReadBufferSize)),
+		wr:   NewWriter(conn, NewPool(c.WriteBufferSize)),
 	}
 }
 
 type Conn struct {
 	ctx         context.Context
-	cancel      context.CancelFunc
+	cancel      context.CancelCauseFunc
 	idCounter   *uint32
 	respSession *sessionManager
 	reqSessions *sessionManager
 	conn        net.Conn
 	rd          *Reader
 	wr          *Writer
+	// 并发安全的状态存储器
+	storage
 }
 
 func (c *Conn) Serve(h Handler) error {
-	c.ctx, c.cancel = context.WithCancel(context.TODO())
-	ctx, cancel := context.WithCancelCause(context.TODO())
+	c.idCounter = new(uint32)
+	c.respSession = newSessionManager()
+	c.reqSessions = newSessionManager()
+	c.ctx, c.cancel = context.WithCancelCause(context.TODO())
 	defer func() {
-		c.cancel()
-		cancel(nil)
 		c.conn.Close()
+		c.storage.Clear()
 	}()
 	go func() {
 		for {
 			data, err := ReadPacket(c.rd)
 			if err != nil {
-				cancel(err)
+				c.cancel(err)
 				return
 			}
 			chunk, err := newChunk(data)
 			if err != nil {
-				cancel(err)
+				c.cancel(err)
 				return
 			}
 			if chunk.flag&flagRequest != 0 {
@@ -141,12 +142,12 @@ func (c *Conn) Serve(h Handler) error {
 			}
 		}
 	}()
-	select {
-	case <-c.ctx.Done():
+	<-c.ctx.Done()
+	err := context.Cause(c.ctx)
+	if errors.Is(err, context.Canceled) {
 		return nil
-	case <-ctx.Done():
-		return context.Cause(ctx)
 	}
+	return err
 }
 
 func (c *Conn) writeChunk(ch *chunk) (int, error) {
@@ -166,7 +167,7 @@ func (c *Conn) writeChunk(ch *chunk) (int, error) {
 }
 
 func (c *Conn) Stop() {
-	c.cancel()
+	c.cancel(nil)
 }
 
 // Session 创建一个会话
@@ -182,6 +183,42 @@ func (c *Conn) Session() (*Session, error) {
 	session := newSession(newSessionState(flagRequest, id, c))
 	c.respSession.Set(id, session)
 	return session, nil
+}
+
+func (c *Conn) Request(ctx context.Context, data []byte) (resp []byte, err error) {
+	curCtx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	go func() {
+		defer cancel()
+		var session *Session
+		if session, err = c.Session(); err != nil {
+			return
+		}
+		defer func() {
+			session.SessionReader.Close()
+			session.SessionWriter.Close()
+		}()
+		if _, err = session.WriteClose(data); err != nil {
+			return
+		}
+		for {
+			var b []byte
+			if b, err = session.ReadChunk(); err != nil {
+				if err == io.EOF {
+					err = nil
+				}
+				return
+			}
+			resp = append(resp, b...)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-curCtx.Done():
+		return
+	}
 }
 
 func (c *Conn) LocalAddr() net.Addr {
@@ -204,48 +241,49 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
-func newConnManager() *connManager {
-	return &connManager{
-		m: make(map[string]*Conn),
-	}
+func (c *Conn) NetConn() net.Conn {
+	return c.conn
 }
 
-type connManager struct {
-	m map[string]*Conn
+type storage struct {
+	m map[any]any
 	l sync.RWMutex
 }
 
-func (c *connManager) Set(k string, v *Conn) {
-	c.l.Lock()
-	c.m[k] = v
-	c.l.Unlock()
+func (s *storage) Set(k, v any) {
+	s.l.Lock()
+	if s.m == nil {
+		s.m = make(map[any]any)
+	}
+	s.m[k] = v
+	s.l.Unlock()
 }
 
-func (c *connManager) Get(k string) (*Conn, bool) {
-	c.l.RLock()
-	v, ok := c.m[k]
-	c.l.RUnlock()
+func (s *storage) Get(k any) (any, bool) {
+	s.l.RLock()
+	v, ok := s.m[k]
+	s.l.RUnlock()
 	return v, ok
 }
 
-func (c *connManager) Del(k string) {
-	c.l.Lock()
-	delete(c.m, k)
-	c.l.Unlock()
+func (s *storage) Del(k any) {
+	s.l.Lock()
+	delete(s.m, k)
+	s.l.Unlock()
 }
 
-func (c *connManager) RangeConn(fn func(conn *Conn) bool) {
-	c.l.RLock()
-	for _, conn := range c.m {
-		if fn(conn) {
+func (s *storage) Range(fn func(k, v any) bool) {
+	s.l.RLock()
+	for k, v := range s.m {
+		if !fn(k, v) {
 			break
 		}
 	}
-	c.l.RUnlock()
+	s.l.RUnlock()
 }
 
-func (c *connManager) Clear() {
-	c.l.Lock()
-	c.m = make(map[string]*Conn)
-	c.l.Unlock()
+func (s *storage) Clear() {
+	s.l.Lock()
+	s.m = nil
+	s.l.Unlock()
 }
