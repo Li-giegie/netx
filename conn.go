@@ -68,12 +68,17 @@ func Dial(network, addr string, opt ...Config) (*Conn, error) {
 	return NewConn(conn, &c), nil
 }
 
-func NewConn(conn net.Conn, c *Config) *Conn {
-	return &Conn{
-		conn: conn,
-		rd:   NewReader(bufio.NewReaderSize(conn, c.ReadBufferSize)),
-		wr:   NewWriter(conn, NewPool(c.WriteBufferSize)),
+func NewConn(conn net.Conn, cfg *Config) *Conn {
+	c := &Conn{
+		conn:        conn,
+		idCounter:   new(uint32),
+		respSession: newSessionManager(),
+		reqSessions: newSessionManager(),
+		rd:          NewReader(bufio.NewReaderSize(conn, cfg.ReadBufferSize)),
+		wr:          NewWriter(conn, NewPool(cfg.WriteBufferSize)),
 	}
+	c.ctx, c.cancel = context.WithCancelCause(context.Background())
+	return c
 }
 
 type Conn struct {
@@ -90,10 +95,6 @@ type Conn struct {
 }
 
 func (c *Conn) Serve(h Handler) error {
-	c.idCounter = new(uint32)
-	c.respSession = newSessionManager()
-	c.reqSessions = newSessionManager()
-	c.ctx, c.cancel = context.WithCancelCause(context.TODO())
 	defer func() {
 		c.conn.Close()
 		c.storage.Clear()
@@ -186,7 +187,7 @@ func (c *Conn) Session() (*Session, error) {
 }
 
 func (c *Conn) Request(ctx context.Context, data []byte) (resp []byte, err error) {
-	curCtx, cancel := context.WithCancel(context.TODO())
+	curCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
 		defer cancel()
