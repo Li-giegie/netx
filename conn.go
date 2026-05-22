@@ -124,7 +124,7 @@ func (c *Conn) Serve(h Handler) error {
 						session.SessionReader.setRecv(chunk.data)
 					}
 					if chunk.flag&flagClose != 0 {
-						session.SessionReader.Close()
+						session.SessionReader.closeWithError(io.EOF)
 					}
 				}
 				continue
@@ -136,7 +136,7 @@ func (c *Conn) Serve(h Handler) error {
 						session.SessionReader.setRecv(chunk.data)
 					}
 					if chunk.flag&flagClose != 0 {
-						session.SessionReader.Close()
+						session.SessionReader.closeWithError(io.EOF)
 					}
 					continue
 				}

@@ -99,14 +99,3 @@ func Test_reader(t *testing.T) {
 		time.Sleep(time.Second)
 	}
 }
-
-func TestR(t *testing.T) {
-	b := bytes.NewBuffer(nil)
-	b.WriteString("hello")
-
-	data, err := io.ReadAll(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Println(string(data))
-}

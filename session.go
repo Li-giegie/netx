@@ -1,8 +1,7 @@
 package netx
 
 import (
-	"errors"
-	"io"
+	"net"
 	"sync"
 )
 
@@ -19,8 +18,6 @@ func newSession(state *sessionState) *Session {
 }
 
 // Session 一个逻辑层连接，每个 Session 都拥有一个唯一递增Id，发送和接收字节流通过其提供的 Write、Read方法操作
-// 当调用 SessionWriter 的 Close() 方法时 SessionReader 读取端会返回 io.EOF 错误
-// 当调用 SessionReader 的 Close() 方法时 释放会话资源，如果再接受到该回话的字节快，会被丢弃
 type Session struct {
 	*SessionWriter
 	*SessionReader
@@ -44,6 +41,7 @@ func (s *sessionState) Id() uint32 {
 	return s.id
 }
 
+// SessionWriter 会话 Writer 发送字节流
 type SessionWriter struct {
 	*sessionState
 	err  error
@@ -52,31 +50,24 @@ type SessionWriter struct {
 
 // WriteClose 写入后立即关闭写入会话，相当于 Write + Close
 func (s *SessionWriter) WriteClose(b []byte) (n int, err error) {
-	if s.err != nil {
-		return 0, s.err
+	if n, err = s.Write(b); err != nil {
+		return
 	}
-	n, err = s.c.writeChunk(&chunk{
-		flag: s.flag | flagClose,
-		id:   s.id,
-		data: b,
-	})
-	s.err = io.EOF
-	if err != nil {
-		s.err = errors.Join(err, io.EOF)
-	}
-	return n, err
+	return n, s.Close()
 }
 
 // Write 写入一个字节块
-func (s *SessionWriter) Write(b []byte) (n int, err error) {
+func (s *SessionWriter) Write(b []byte) (int, error) {
 	if s.err != nil {
 		return 0, s.err
 	}
-	return s.c.writeChunk(&chunk{
+	var n int
+	n, s.err = s.c.writeChunk(&chunk{
 		flag: s.flag,
 		id:   s.id,
 		data: b,
 	})
+	return n, s.err
 }
 
 // Close 关闭写会话，关闭后不能再向该会话写入
@@ -90,25 +81,24 @@ func (s *SessionWriter) Close() (err error) {
 			id:   s.id,
 		})
 		if err != nil {
-			s.err = errors.Join(err, io.EOF)
 			return
 		}
-		s.err = io.EOF
+		s.err = net.ErrClosed
 	})
 	return
 }
 
+// SessionReader 会话 Reader 发送方 SessionWriter 调用 Close 方法后 Read 返回 io.EOF 错误
 type SessionReader struct {
 	*sessionState
 	recv chan []byte
 	buf  []byte
 	i    int
 	err  error
-	l    sync.RWMutex
-	once sync.Once
+	l    sync.Mutex
 }
 
-// Read 读取字节流
+// Read 读取字节流，发送方 SessionWriter 调用 Close 方法后 Read 返回 io.EOF 错误
 func (s *SessionReader) Read(b []byte) (n int, err error) {
 	if s.i != len(s.buf) {
 		n = copy(b, s.buf[s.i:])
@@ -125,7 +115,7 @@ func (s *SessionReader) Read(b []byte) (n int, err error) {
 	return
 }
 
-// ReadChunk 读取一个块
+// ReadChunk 读取一个块，发送方 SessionWriter 调用 Close 方法后 Read 返回 io.EOF 错误
 func (s *SessionReader) ReadChunk() ([]byte, error) {
 	if s.i != len(s.buf) {
 		s.i = len(s.buf)
@@ -138,34 +128,35 @@ func (s *SessionReader) ReadChunk() ([]byte, error) {
 	return rb, nil
 }
 
-func (s *SessionReader) setRecv(b []byte) error {
-	s.l.RLock()
+func (s *SessionReader) setRecv(b []byte) {
+	s.l.Lock()
+	defer s.l.Unlock()
 	if s.err != nil {
-		s.l.RUnlock()
-		return s.err
+		return
 	}
 	s.recv <- b
-	s.l.RUnlock()
-	return nil
+	return
 }
 
 // Close 关闭读会话
 func (s *SessionReader) Close() (err error) {
+	return s.closeWithError(net.ErrClosed)
+}
+
+func (s *SessionReader) closeWithError(err error) error {
+	s.l.Lock()
+	defer s.l.Unlock()
 	if s.err != nil {
 		return s.err
 	}
-	s.once.Do(func() {
-		if s.flag&flagRequest != 0 {
-			s.c.respSession.Del(s.id)
-		} else {
-			s.c.reqSessions.Del(s.id)
-		}
-		s.l.Lock()
-		s.err = io.EOF
-		close(s.recv)
-		s.l.Unlock()
-	})
-	return
+	s.err = err
+	if s.flag&flagRequest != 0 {
+		s.c.respSession.Del(s.id)
+	} else {
+		s.c.reqSessions.Del(s.id)
+	}
+	close(s.recv)
+	return nil
 }
 
 func newSessionManager() *sessionManager {
